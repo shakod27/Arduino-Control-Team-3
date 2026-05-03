@@ -234,9 +234,11 @@ What I confirmed during simulation:
 - Buttons correctly increment and decrement setpoints with limit warnings
 - LCD switches between main screen and setpoint screen correctly
 - Serial monitor prints clean readable output once per second
-Concerns
+
+```Concerns
 Buttons needed to be pushed repeatedly to function [Added a bouncing delays
 Simulation was working bakcward at some point, Will debug it with Owen at debugging stage
+```
 
 
 ---
