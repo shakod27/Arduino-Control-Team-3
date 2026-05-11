@@ -2,17 +2,16 @@
 #include <LiquidCrystal_I2C.h>
 
 // ── Pin Definitions ──────────────────────────
-#define DHT_PIN        2
-#define DHT_TYPE       DHT22
+#define DHT_PIN      2
+#define DHT_TYPE     DHT22
 
-#define RELAY_HEATER   4
-#define RELAY_HUMID    5
-#define RELAY_FAN      6
+#define RELAY_HEATER 4
+#define RELAY_HUMID  5
+#define RELAY_FAN    6
 
-#define BTN_TEMP_UP    7
-#define BTN_TEMP_DOWN  8
-#define BTN_HUMID_UP   9
-#define BTN_HUMID_DOWN 10
+#define ENC_CLK      3
+#define ENC_DT       4
+#define ENC_SW       5
 
 #define RELAY_ON  LOW
 #define RELAY_OFF HIGH
@@ -22,15 +21,13 @@
 #define TEMP_MIN  15.0
 #define HUMID_MAX 90.0
 #define HUMID_MIN 20.0
-
 #define EMERGENCY_TEMP 65.0
 
 // ── Timing ───────────────────────────────────
-#define DHT_INTERVAL      2000
-#define DISPLAY_TIMEOUT   3000
-#define DEBOUNCE_DELAY    150
+#define DHT_INTERVAL       2000
+#define DISPLAY_TIMEOUT    3000
 #define RELAY_MIN_INTERVAL 10000
-#define SERIAL_INTERVAL   1000   // print once per second
+#define SERIAL_INTERVAL    1000
 
 // ── Objects ──────────────────────────────────
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -46,38 +43,61 @@ float HUMID_DEADBAND = 2.0;
 float temperature = 0;
 float humidity    = 0;
 
-unsigned long lastDHTRead      = 0;
-unsigned long lastButtonPress  = 0;
-unsigned long lastSerial       = 0;   // ← added
+bool editingTemp = true;   // true = adjusting TEMP, false = adjusting HUMID
 
-// Relay timing
+unsigned long lastDHTRead     = 0;
+unsigned long lastEncoderMove = 0;
+unsigned long lastSerial      = 0;
 unsigned long heaterLastSwitch = 0;
 unsigned long humidLastSwitch  = 0;
 
-// Button states
-bool lastBtnState[4]          = {HIGH, HIGH, HIGH, HIGH};
-unsigned long lastDebounceTime[4] = {0, 0, 0, 0};
+// ── Encoder state ────────────────────────────
+int  lastCLK;
+bool lastSWState = HIGH;
+unsigned long lastSWPress = 0;
 
-// ── Helper: Button handler ───────────────────
-bool buttonPressed(int pin, int index) {
-  bool reading = digitalRead(pin);
+// ── Encoder: read rotation ───────────────────
+void handleEncoder() {
+  int currentCLK = digitalRead(ENC_CLK);
 
-  if (reading != lastBtnState[index]) {
-    lastDebounceTime[index] = millis();
-  }
+  if (currentCLK != lastCLK) {
+    bool turnedRight = (digitalRead(ENC_DT) != currentCLK);
 
-  if ((millis() - lastDebounceTime[index]) > DEBOUNCE_DELAY) {
-    if (reading == LOW && lastBtnState[index] == HIGH) {
-      lastBtnState[index] = reading;
-      return true;
+    if (editingTemp) {
+      if (turnedRight && TEMP_SETPOINT < TEMP_MAX) TEMP_SETPOINT++;
+      else if (!turnedRight && TEMP_SETPOINT > TEMP_MIN) TEMP_SETPOINT--;
+      showTempSetpointLCD();
+    } else {
+      if (turnedRight && HUMID_SETPOINT < HUMID_MAX) HUMID_SETPOINT++;
+      else if (!turnedRight && HUMID_SETPOINT > HUMID_MIN) HUMID_SETPOINT--;
+      showHumidSetpointLCD();
     }
-  }
 
-  lastBtnState[index] = reading;
-  return false;
+    lastEncoderMove = millis();
+    lastCLK = currentCLK;
+  }
 }
 
-// ── LCD ──────────────────────────────────────
+// ── Encoder: read button click ───────────────
+void handleButton() {
+  bool currentSW = digitalRead(ENC_SW);
+
+  if (currentSW == LOW && lastSWState == HIGH &&
+      millis() - lastSWPress > 300) {
+    editingTemp = !editingTemp;   // toggle mode
+    lastSWPress = millis();
+    lastEncoderMove = millis();
+
+    if (editingTemp) showTempSetpointLCD();
+    else             showHumidSetpointLCD();
+
+    Serial.println(editingTemp ? "MODE: TEMP" : "MODE: HUMID");
+  }
+
+  lastSWState = currentSW;
+}
+
+// ── LCD screens ──────────────────────────────
 void showMainLCD() {
   lcd.setCursor(0, 0);
   lcd.print("T:");
@@ -88,23 +108,27 @@ void showMainLCD() {
 
   lcd.setCursor(0, 1);
   lcd.print("SP:");
-  lcd.print(TEMP_SETPOINT, 0);
-  lcd.print(" ");
+  lcd.print(editingTemp ? TEMP_SETPOINT : HUMID_SETPOINT, 0);
+  lcd.print(editingTemp ? "C " : "% ");
   lcd.print(digitalRead(RELAY_HEATER) == LOW ? "H:ON " : "H:OFF");
 }
 
 void showTempSetpointLCD() {
   lcd.clear();
-  lcd.print("Temp SP:");
+  lcd.print(">> TEMP mode");
   lcd.setCursor(0, 1);
+  lcd.print("Setpoint: ");
   lcd.print(TEMP_SETPOINT, 0);
+  lcd.print("C");
 }
 
 void showHumidSetpointLCD() {
   lcd.clear();
-  lcd.print("Humid SP:");
+  lcd.print(">> HUMID mode");
   lcd.setCursor(0, 1);
+  lcd.print("Setpoint: ");
   lcd.print(HUMID_SETPOINT, 0);
+  lcd.print("%");
 }
 
 void showEmergency() {
@@ -125,53 +149,31 @@ void setup() {
   pinMode(RELAY_HEATER, OUTPUT);
   pinMode(RELAY_HUMID,  OUTPUT);
   pinMode(RELAY_FAN,    OUTPUT);
-
   digitalWrite(RELAY_HEATER, RELAY_OFF);
   digitalWrite(RELAY_HUMID,  RELAY_OFF);
   digitalWrite(RELAY_FAN,    RELAY_OFF);
 
-  pinMode(BTN_TEMP_UP,    INPUT_PULLUP);
-  pinMode(BTN_TEMP_DOWN,  INPUT_PULLUP);
-  pinMode(BTN_HUMID_UP,   INPUT_PULLUP);
-  pinMode(BTN_HUMID_DOWN, INPUT_PULLUP);
+  pinMode(ENC_CLK, INPUT);
+  pinMode(ENC_DT,  INPUT);
+  pinMode(ENC_SW,  INPUT_PULLUP);
+  lastCLK = digitalRead(ENC_CLK);
 
   lcd.print("Chamber Init...");
   delay(1500);
   lcd.clear();
+  showTempSetpointLCD();
 }
 
 // ── Main Loop ────────────────────────────────
 void loop() {
 
-  // ── Buttons ────────────────────────────────
-  if (buttonPressed(BTN_TEMP_UP, 0)) {
-    if (TEMP_SETPOINT < TEMP_MAX) TEMP_SETPOINT++;
-    showTempSetpointLCD();
-    lastButtonPress = millis();
-  }
-
-  if (buttonPressed(BTN_TEMP_DOWN, 1)) {
-    if (TEMP_SETPOINT > TEMP_MIN) TEMP_SETPOINT--;
-    showTempSetpointLCD();
-    lastButtonPress = millis();
-  }
-
-  if (buttonPressed(BTN_HUMID_UP, 2)) {
-    if (HUMID_SETPOINT < HUMID_MAX) HUMID_SETPOINT++;
-    showHumidSetpointLCD();
-    lastButtonPress = millis();
-  }
-
-  if (buttonPressed(BTN_HUMID_DOWN, 3)) {
-    if (HUMID_SETPOINT > HUMID_MIN) HUMID_SETPOINT--;
-    showHumidSetpointLCD();
-    lastButtonPress = millis();
-  }
+  // ── Encoder ────────────────────────────────
+  handleEncoder();
+  handleButton();
 
   // ── Sensor Read ────────────────────────────
   if (millis() - lastDHTRead >= DHT_INTERVAL) {
     lastDHTRead = millis();
-
     humidity    = dht.readHumidity();
     temperature = dht.readTemperature();
 
@@ -189,7 +191,7 @@ void loop() {
   if (temperature >= EMERGENCY_TEMP) {
     digitalWrite(RELAY_HEATER, RELAY_OFF);
     digitalWrite(RELAY_HUMID,  RELAY_OFF);
-    digitalWrite(RELAY_FAN,    RELAY_ON);   // keep fan ON to cool down
+    digitalWrite(RELAY_FAN,    RELAY_ON);
     showEmergency();
     return;
   }
@@ -219,15 +221,17 @@ void loop() {
   // ── Fan always ON ───────────────────────────
   digitalWrite(RELAY_FAN, RELAY_ON);
 
-  // ── LCD ────────────────────────────────────
-  if (millis() - lastButtonPress > DISPLAY_TIMEOUT) {
+  // ── LCD main screen after timeout ──────────
+  if (millis() - lastEncoderMove > DISPLAY_TIMEOUT) {
     showMainLCD();
   }
 
-  // ── Serial — once per second ────────────────
+  // ── Serial ─────────────────────────────────
   if (millis() - lastSerial >= SERIAL_INTERVAL) {
     lastSerial = millis();
-    Serial.print("T:");
+    Serial.print("MODE:");
+    Serial.print(editingTemp ? "TEMP" : "HUMID");
+    Serial.print(" T:");
     Serial.print(temperature);
     Serial.print(" H:");
     Serial.print(humidity);
